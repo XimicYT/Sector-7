@@ -1,67 +1,88 @@
-const API_URL = 'https://sector-7.onrender.com/api'; 
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const { createClient } = require('@supabase/supabase-js');
+const { z } = require('zod');
 
-function showToast(message, isError = false) {
-    const container = document.getElementById('toast-container');
-    const toast = document.createElement('div');
-    toast.className = `toast ${isError ? 'error' : ''}`;
-    toast.innerText = message;
-    container.appendChild(toast);
-    setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 4000);
-}
+const app = express();
+app.use(cors());
+app.use(express.json());
 
-async function fetchShipStatus() {
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const ADMIN_SECRET = process.env.ADMIN_SECRET || 'super-secret-local-key'; // Add this to Render!
+
+// Validation Schema
+const actionSchema = z.object({
+    player_id: z.string().uuid(),
+    action_type: z.enum(['repair', 'hoard', 'audit']),
+    target_system: z.enum(['hull', 'life_support', 'nav', 'none']),
+    eu_invested: z.number().int().min(1).max(30)
+});
+
+// Middleware: Protect Admin Routes
+const requireAdmin = (req, res, next) => {
+    const key = req.headers['x-admin-key'];
+    if (key !== ADMIN_SECRET) return res.status(403).json({ error: "Unauthorized." });
+    next();
+};
+
+app.get('/api/ship-status', async (req, res) => {
+    const { data, error } = await supabase.from('ship_status').select('*').eq('id', 1).single();
+    if (error) return res.status(500).json({ error: "Database error." });
+    res.json(data);
+});
+
+app.post('/api/submit-action', async (req, res) => {
     try {
-        const res = await fetch(`${API_URL}/ship-status`);
-        if (!res.ok) throw new Error("Connection failed.");
-        const ship = await res.json();
-
-        document.getElementById('day-display').innerText = ship.current_day;
-        updateBar('hull', ship.hull);
-        updateBar('ls', ship.life_support);
-        updateBar('nav', ship.nav);
-
-        if (ship.is_destroyed) {
-            document.getElementById('death-warning').classList.remove('hidden');
+        const validatedData = actionSchema.parse(req.body);
+        
+        const { error } = await supabase.from('pending_actions').insert([validatedData]);
+        if (error) throw error;
+        
+        res.json({ message: "Action successfully encrypted and locked in." });
+    } catch (err) {
+        if (err instanceof z.ZodError) {
+            return res.status(400).json({ error: "Invalid action parameters.", details: err.errors });
         }
-    } catch (error) {
-        showToast("Error connecting to server.", true);
+        res.status(500).json({ error: "Failed to submit action." });
     }
-}
+});
 
-function updateBar(id, value) {
-    document.getElementById(`${id}-text`).innerText = `${value}%`;
-    const bar = document.getElementById(`${id}-bar`);
-    bar.style.width = `${value}%`;
-    
-    if (value <= 30) {
-        bar.classList.add('critical');
-    } else {
-        bar.classList.remove('critical');
-    }
-}
-
-async function submitAction() {
-    const payload = {
-        player_id: document.getElementById('player-id').value,
-        action_type: document.getElementById('action-type').value,
-        target_system: document.getElementById('target-system').value,
-        eu_invested: parseInt(document.getElementById('eu-amount').value)
-    };
-
+app.post('/admin/resolve-day', requireAdmin, async (req, res) => {
     try {
-        const res = await fetch(`${API_URL}/submit-action`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        
-        const result = await res.json();
-        
-        if (!res.ok) throw new Error(result.error || "Submission failed");
-        showToast(result.message);
-    } catch (error) {
-        showToast(error.message, true);
-    }
-}
+        let { data: ship } = await supabase.from('ship_status').select('*').eq('id', 1).single();
+        if (ship.is_destroyed) return res.status(400).json({ message: "Ship is destroyed." });
 
-fetchShipStatus();
+        const { data: actions } = await supabase.from('pending_actions').select('*');
+
+        let repairs = { hull: 0, life_support: 0, nav: 0 };
+        
+        // Tally actions
+        actions.forEach(a => {
+            if (a.action_type === 'repair' && repairs[a.target_system] !== undefined) {
+                repairs[a.target_system] += a.eu_invested;
+            }
+        });
+
+        // Calculate Stats (Base 20% decay for higher difficulty)
+        let newHull = Math.min(100, (ship.hull - 20) + repairs.hull);
+        let newLS = Math.min(100, (ship.life_support - 20) + repairs.life_support);
+        let newNav = Math.min(100, (ship.nav - 20) + repairs.nav);
+        
+        let isDestroyed = (newHull <= 0 || newLS <= 0 || newNav <= 0);
+
+        await supabase.from('ship_status').update({
+            hull: newHull, life_support: newLS, nav: newNav,
+            current_day: ship.current_day + 1, is_destroyed: isDestroyed
+        }).eq('id', 1);
+
+        await supabase.from('pending_actions').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+
+        res.json({ message: "Cycle resolved.", newStats: { newHull, newLS, newNav, isDestroyed } });
+    } catch (err) {
+        res.status(500).json({ error: "Tick resolution failed." });
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Engine running on ${PORT}`));

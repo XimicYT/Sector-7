@@ -1,155 +1,67 @@
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const { createClient } = require('@supabase/supabase-js');
+const API_URL = 'https://sector-7.onrender.com/api'; 
 
-const app = express();
-
-// Middleware
-app.use(cors());
-app.use(express.json());
-
-// Initialize Supabase Client
-// Render will pull these from your Environment Variables dashboard
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY;
-
-if (!supabaseUrl || !supabaseKey) {
-    console.error("CRITICAL ERROR: Supabase URL or Key is missing from Environment Variables.");
-    process.exit(1);
+function showToast(message, isError = false) {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = `toast ${isError ? 'error' : ''}`;
+    toast.innerText = message;
+    container.appendChild(toast);
+    setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 4000);
 }
 
-const supabase = createClient(supabaseUrl, supabaseKey);
-
-// ==========================================
-// ENDPOINT: Get Current Ship Status
-// ==========================================
-app.get('/api/ship-status', async (req, res) => {
+async function fetchShipStatus() {
     try {
-        const { data, error } = await supabase
-            .from('ship_status')
-            .select('*')
-            .eq('id', 1)
-            .single();
+        const res = await fetch(`${API_URL}/ship-status`);
+        if (!res.ok) throw new Error("Connection failed.");
+        const ship = await res.json();
 
-        if (error) throw error;
-        res.json(data);
-    } catch (err) {
-        console.error("Error fetching ship status:", err.message);
-        res.status(500).json({ error: "Failed to retrieve ship status." });
-    }
-});
+        document.getElementById('day-display').innerText = ship.current_day;
+        updateBar('hull', ship.hull);
+        updateBar('ls', ship.life_support);
+        updateBar('nav', ship.nav);
 
-// ==========================================
-// ENDPOINT: Submit Daily Action (Blind Commit)
-// ==========================================
-app.post('/api/submit-action', async (req, res) => {
-    try {
-        const { player_id, action_type, eu_invested, target_system } = req.body;
-        
-        // Basic validation
-        if (!player_id || !action_type || !eu_invested) {
-            return res.status(400).json({ error: "Missing required fields." });
-        }
-
-        const { data, error } = await supabase
-            .from('pending_actions')
-            .insert([{ 
-                player_id, 
-                action_type, 
-                eu_invested: parseInt(eu_invested), 
-                target_system 
-            }]);
-        
-        if (error) throw error;
-        res.json({ message: "Action locked in for the current cycle." });
-    } catch (err) {
-        console.error("Error submitting action:", err.message);
-        res.status(500).json({ error: "Failed to submit action." });
-    }
-});
-
-// ==========================================
-// ENDPOINT: Trigger Daily Resolution (The Engine)
-// ==========================================
-app.post('/admin/resolve-day', async (req, res) => {
-    try {
-        // 1. Fetch current ship state
-        let { data: ship, error: shipError } = await supabase
-            .from('ship_status')
-            .select('*')
-            .eq('id', 1)
-            .single();
-
-        if (shipError) throw shipError;
-        
         if (ship.is_destroyed) {
-            return res.status(400).json({ message: "Game Over. Ship is already destroyed." });
+            document.getElementById('death-warning').classList.remove('hidden');
         }
-
-        // 2. Fetch all pending actions for the day
-        const { data: actions, error: actionsError } = await supabase
-            .from('pending_actions')
-            .select('*');
-
-        if (actionsError) throw actionsError;
-
-        // 3. Tally the repair investments
-        let hullRepairs = 0;
-        let lsRepairs = 0;
-        let navRepairs = 0;
-
-        actions.forEach(action => {
-            if (action.action_type === 'repair') {
-                if (action.target_system === 'hull') hullRepairs += action.eu_invested;
-                if (action.target_system === 'life_support') lsRepairs += action.eu_invested;
-                if (action.target_system === 'nav') navRepairs += action.eu_invested;
-            }
-        });
-
-        // 4. Calculate new stats (Base decay is 15%, plus repairs, max out at 100)
-        let newHull = Math.min(100, (ship.hull - 15) + hullRepairs);
-        let newLS = Math.min(100, (ship.life_support - 15) + lsRepairs);
-        let newNav = Math.min(100, (ship.nav - 15) + navRepairs);
-        
-        // 5. Check failure state
-        let isDestroyed = (newHull <= 0 || newLS <= 0 || newNav <= 0);
-
-        // 6. Push updated state to database
-        const { error: updateError } = await supabase
-            .from('ship_status')
-            .update({
-                hull: newHull,
-                life_support: newLS,
-                nav: newNav,
-                current_day: ship.current_day + 1,
-                is_destroyed: isDestroyed
-            })
-            .eq('id', 1);
-
-        if (updateError) throw updateError;
-
-        // 7. Clear the queue for the next day's actions
-        const { error: deleteError } = await supabase
-            .from('pending_actions')
-            .delete()
-            .neq('id', '00000000-0000-0000-0000-000000000000'); // Deletes all rows safely
-
-        if (deleteError) throw deleteError;
-
-        res.json({ 
-            message: "Day resolved successfully. Moving to next cycle.", 
-            newStats: { newHull, newLS, newNav, isDestroyed } 
-        });
-
-    } catch (err) {
-        console.error("Error resolving day:", err.message);
-        res.status(500).json({ error: "Failed to resolve the daily tick." });
+    } catch (error) {
+        showToast("Error connecting to server.", true);
     }
-});
+}
 
-// Start the server (Render sets process.env.PORT automatically)
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Sector 7 Engine running on port ${PORT}`);
-});
+function updateBar(id, value) {
+    document.getElementById(`${id}-text`).innerText = `${value}%`;
+    const bar = document.getElementById(`${id}-bar`);
+    bar.style.width = `${value}%`;
+    
+    if (value <= 30) {
+        bar.classList.add('critical');
+    } else {
+        bar.classList.remove('critical');
+    }
+}
+
+async function submitAction() {
+    const payload = {
+        player_id: document.getElementById('player-id').value,
+        action_type: document.getElementById('action-type').value,
+        target_system: document.getElementById('target-system').value,
+        eu_invested: parseInt(document.getElementById('eu-amount').value)
+    };
+
+    try {
+        const res = await fetch(`${API_URL}/submit-action`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        
+        const result = await res.json();
+        
+        if (!res.ok) throw new Error(result.error || "Submission failed");
+        showToast(result.message);
+    } catch (error) {
+        showToast(error.message, true);
+    }
+}
+
+fetchShipStatus();

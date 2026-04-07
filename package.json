@@ -1,7 +1,7 @@
 {
   "name": "sector-7-backend",
-  "version": "1.0.0",
-  "description": "Backend engine for Sector 7 Protocol",
+  "version": "2.0.0",
+  "description": "Production engine for Sector 7 Protocol",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -10,7 +10,8 @@
     "@supabase/supabase-js": "^2.39.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.1",
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "zod": "^3.22.4"
   },
   "engines": {
     "node": ">=18.0.0"
